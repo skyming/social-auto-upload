@@ -450,7 +450,7 @@ def postVideo():
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days)
+                                   start_days, ai_generated=data.get('aiGenerated', True))
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                                    start_days, is_draft)
@@ -546,7 +546,7 @@ def postVideoBatch():
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                               start_days)
+                               start_days, ai_generated=data.get('aiGenerated', True))
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
                                    start_days, is_draft)
