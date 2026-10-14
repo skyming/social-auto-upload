@@ -28,6 +28,8 @@ XHS_LOGIN_BOX_SELECTOR = "div[class*='login-box']"
 XHS_LOGIN_SWITCH_SELECTOR = "img.css-wemwzq"
 XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
+XHS_AI_DECLARATION_LABEL = "笔记含AI合成内容"
+XHS_CONTENT_DECLARATION_TIMEOUT_MS = 5000
 
 
 def _build_xhs_creator_url(path: str) -> str:
@@ -314,6 +316,7 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        ai_generated: bool = True,
     ):
         self.publish_date = publish_date
         self.account_file = str(account_file)
@@ -322,6 +325,9 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         self.date_format = "%Y年%m月%d日 %H:%M"
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = headless
+        if not isinstance(ai_generated, bool):
+            raise ValueError("ai_generated 必须是布尔值")
+        self.ai_generated = ai_generated
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
@@ -466,15 +472,64 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         await self.fill_desc(page)
         await self.fill_tags(page)
 
-    async def check_original_declaration(self, page: Page) -> None:
-        """设置「来源转载」声明，填写转载来源。
+    async def set_ai_content_declaration(self, page: Page) -> None:
+        """选择原生 AI 声明，并在菜单收起后读回发布表单中的已选标签。"""
+        timeout = XHS_CONTENT_DECLARATION_TIMEOUT_MS
+        selected_label = page.locator("#publish-container").get_by_text(
+            XHS_AI_DECLARATION_LABEL, exact=True
+        ).filter(visible=True)
+        # 菜单中的同名选项并不表示表单已选中。以其它原生选项确认菜单
+        # 已收起，再读取表单中的声明标签，避免把打开的菜单误判成已声明。
+        menu_marker = page.get_by_text("虚构演绎，仅供娱乐", exact=True).first
 
-        流程（对应 codegen 录制）：
-          点「添加内容类型声明」→ 点包含「来源转载」的 div
-          → 填 placeholder「请输入媒体名称」→ 点 button「确认」。
-        容错：任一步失败记 warning 跳过、继续发布，不中断。
+        async def close_menu():
+            if await menu_marker.is_visible():
+                await page.keyboard.press("Escape")
+                if await menu_marker.is_visible():
+                    await page.locator('input[placeholder*="填写标题"]').first.click(timeout=timeout)
+                await menu_marker.wait_for(state="hidden", timeout=timeout)
+
+        try:
+            # 已选声明时用户可能把菜单留在展开状态。先收起菜单后读回，
+            # 避免再次点击已选项而将声明取消。
+            await close_menu()
+            if await selected_label.count() == 1:
+                xiaohongshu_logger.success(_msg("🧾", f"已验证内容声明：{XHS_AI_DECLARATION_LABEL}"))
+                return
+
+            trigger = page.get_by_text("添加内容类型声明", exact=True).first
+            await trigger.wait_for(state="visible", timeout=timeout)
+            await trigger.scroll_into_view_if_needed(timeout=timeout)
+            await trigger.click(timeout=timeout)
+            await menu_marker.wait_for(state="visible", timeout=timeout)
+
+            option = page.get_by_text(XHS_AI_DECLARATION_LABEL, exact=True).filter(visible=True).first
+            await option.wait_for(state="visible", timeout=timeout)
+            await option.click(timeout=timeout)
+            await close_menu()
+            await menu_marker.wait_for(state="hidden", timeout=timeout)
+            await selected_label.first.wait_for(state="visible", timeout=timeout)
+            if await selected_label.count() != 1:
+                raise RuntimeError("无法唯一确认发布表单中的 AI 声明标签")
+            if (await selected_label.first.inner_text()).strip() != XHS_AI_DECLARATION_LABEL:
+                raise RuntimeError("发布表单中的 AI 声明标签不匹配")
+            xiaohongshu_logger.success(_msg("🧾", f"已验证内容声明：{XHS_AI_DECLARATION_LABEL}"))
+        except Exception as exc:
+            raise RuntimeError("小红书 AI 声明未设置或未通过验证，拒绝继续发布") from exc
+
+    async def check_original_declaration(self, page: Page) -> None:
+        """按显式参数设置内容声明；必需的 AI 声明失败时停止发布。
+
+        保留原调用名称以兼容旧入口。仅存在非空 repost_source 时使用转载
+        分支，避免将普通内容或 AI 内容错误声明成无来源的转载。
         """
-        source = getattr(self, "repost_source", "") or ""
+        if self.ai_generated:
+            await self.set_ai_content_declaration(page)
+            return
+
+        source = (getattr(self, "repost_source", "") or "").strip()
+        if not source:
+            return
         try:
             # 1. 点「添加内容类型声明」
             trigger = page.get_by_text("添加内容类型声明", exact=False).first
@@ -534,6 +589,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        ai_generated: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -541,6 +597,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            ai_generated=ai_generated,
         )
         self.title = title
         self.file_path = file_path
@@ -739,6 +796,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        ai_generated: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -746,6 +804,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            ai_generated=ai_generated,
         )
         self.image_paths = image_paths
         self.note = note or ""

@@ -555,7 +555,8 @@ const defaultTabInit = {
   publishStatus: null, // 发布状态，包含message和type
   publishing: false, // 发布状态，用于控制按钮loading效果
   isDraft: false, // 是否保存为草稿，仅视频号平台可见
-  isOriginal: false // 是否标记为原创
+  isOriginal: false, // 是否标记为原创
+  aiGenerated: true // 默认声明包含AI生成内容
 }
 
 // helper to create a fresh deep-copied tab from defaultTabInit
@@ -806,7 +807,8 @@ const confirmPublish = async (tab) => {
     category: tab.isOriginal ? 1 : 0, // 1表示原创，0表示非原创
     productLink: tab.productLink.trim() || '',
     productTitle: tab.productTitle.trim() || '',
-    isDraft: tab.isDraft
+    isDraft: tab.isDraft,
+    aiGenerated: true
   }
 
   // 调用后端发布API（使用统一的http封装）
@@ -823,6 +825,7 @@ const confirmPublish = async (tab) => {
     tab.selectedTopics = []
     tab.selectedAccounts = []
     tab.scheduleEnabled = false
+    tab.aiGenerated = true
   } catch (error) {
     console.error('发布错误:', error)
     tab.publishStatus = {
