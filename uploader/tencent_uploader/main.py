@@ -499,6 +499,7 @@ class TencentBaseUploader(BaseVideoUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         collection_name: str | None = None,
+        ai_generated: bool = True,
     ):
         self.publish_date = publish_date
         self.account_file = _resolve_account_file(account_file)
@@ -506,6 +507,8 @@ class TencentBaseUploader(BaseVideoUploader):
         self.debug = debug
         self.headless = headless
         self.collection_name = collection_name
+        self.ai_generated = ai_generated
+        self._ai_label_field = None
         self.local_executable_path = LOCAL_CHROME_PATH
 
     async def validate_base_args(self):
@@ -787,25 +790,73 @@ class TencentBaseUploader(BaseVideoUploader):
             except Exception:
                 pass
 
+    async def _is_ai_label_selected(self, field) -> bool:
+        if field is None:
+            return False
+        # 回读实际触发器所在的控件，不能把下拉菜单内的选项文字当成已选值。
+        # 控件来自已知的「选择视频标注」入口，不依赖推测的页面 class。
+        return bool(await field.evaluate("""element => {
+            if (!element.isConnected) return false;
+            const visible = el => {
+                const style = getComputedStyle(el);
+                return style.display !== 'none' && style.visibility !== 'hidden' &&
+                    el.getClientRects().length > 0;
+            };
+            if (!visible(element) || element.closest(
+                'option, [role="option"], [role="menu"], [role="listbox"], ' +
+                '.option-list-wrap, .option-item, .weui-desktop-dropdown__list'
+            ))
+                return false;
+            const label = '含AI生成内容';
+            for (const select of element.querySelectorAll('select')) {
+                if (visible(select) && [...select.selectedOptions].some(option => option.textContent.trim() === label))
+                    return true;
+            }
+            for (const input of element.querySelectorAll('input')) {
+                if (visible(input) && input.type !== 'checkbox' && input.type !== 'radio' && input.value.trim() === label)
+                    return true;
+            }
+            return element.innerText.trim() === label;
+        }"""))
+
+    async def verify_ai_content_label(self) -> None:
+        if not self.ai_generated:
+            return
+        try:
+            selected = await self._is_ai_label_selected(self._ai_label_field)
+        except Exception as exc:
+            raise RuntimeError("视频号无法回读「含AI生成内容」标注，已停止发布或保存草稿") from exc
+        if not selected:
+            raise RuntimeError("视频号未确认「含AI生成内容」标注，已停止发布或保存草稿")
+
     async def apply_original_statement(self, page: Page) -> None:
-        # 视频号「视频标注」下拉：本项目成片经 AI 处理（TTS 配音、AI 字幕、AI 前贴片），
-        # 依平台合规要求如实选「含AI生成内容」（与「内容为转载」等并列，选定即可、无需填写来源）。
-        # 注意：这与上方独立的「声明原创」复选框是两个不同字段，本项目走 AI 标注、不勾原创声明。
-        label_text = getattr(self, "content_label", None) or "含AI生成内容"
+        # 「视频标注」与独立的「声明原创」复选框是两个字段。
+        if not self.ai_generated:
+            tencent_logger.info(_msg("🧾", "未勾选包含 AI 生成内容，跳过视频标注"))
+            return
+        label_text = "含AI生成内容"
         try:
             entry = page.get_by_text("选择视频标注", exact=True).first
             if not await entry.count():
-                tencent_logger.info(_msg("🧾", "当前页面未发现「视频标注」入口，跳过标注继续发布"))
-                return
+                selected = page.get_by_text(label_text, exact=True).first
+                if await selected.count():
+                    self._ai_label_field = await selected.evaluate_handle("element => element.parentElement")
+                    await self.verify_ai_content_label()
+                    return
+                raise RuntimeError("当前页面未发现「选择视频标注」入口")
+            self._ai_label_field = await entry.evaluate_handle("element => element.parentElement")
             await entry.click()
-            await page.wait_for_timeout(800)
             option = page.get_by_text(label_text, exact=True).first
             await option.wait_for(state="visible", timeout=5000)
             await option.click()
-            await page.wait_for_timeout(500)
+            for _ in range(10):
+                if await self._is_ai_label_selected(self._ai_label_field):
+                    break
+                await page.wait_for_timeout(250)
+            await self.verify_ai_content_label()
             tencent_logger.success(_msg("🏷️", f"视频标注已选择：{label_text}"))
         except Exception as exc:
-            tencent_logger.warning(_msg("😵", f"设置视频标注「{label_text}」失败，跳过继续发布：{exc}"))
+            raise RuntimeError(f"视频号设置「{label_text}」标注失败，已停止发布或保存草稿：{exc}") from exc
 
     async def wait_for_upload_complete(
         self, page: Page, timeout_seconds: int = 3600, max_retries: int = 3
@@ -897,6 +948,7 @@ class TencentBaseUploader(BaseVideoUploader):
             await asyncio.sleep(1)
         else:
             tencent_logger.warning(_msg("😵", "60s 内未找到可见的发表/草稿按钮，尝试强制继续"))
+        await self.verify_ai_content_label()
         # 点发表/草稿
         for attempt in range(20):
             try:
@@ -956,6 +1008,7 @@ class TencentVideo(TencentBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         collection_name: str | None = None,
+        ai_generated: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -964,6 +1017,7 @@ class TencentVideo(TencentBaseUploader):
             debug=debug,
             headless=headless,
             collection_name=collection_name,
+            ai_generated=ai_generated,
         )
         self.title = title
         self.file_path = file_path

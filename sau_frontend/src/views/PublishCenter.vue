@@ -325,6 +325,11 @@
               label="声明原创"
               class="original-checkbox"
             />
+            <el-checkbox
+              v-model="tab.aiGenerated"
+              label="包含 AI 生成"
+              class="original-checkbox"
+            />
           </div>
 
           <!-- 草稿选项 (仅在视频号可见) -->
@@ -870,7 +875,7 @@ const confirmPublish = async (tab) => {
     productLink: tab.productLink.trim() || '',
     productTitle: tab.productTitle.trim() || '',
     isDraft: tab.isDraft,
-    aiGenerated: true
+    aiGenerated: tab.aiGenerated
   }
 
   // 调用后端发布API（使用统一的http封装）

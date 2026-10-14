@@ -266,6 +266,51 @@ test('cross-platform and deleted accounts are rejected before sending a publish 
   assert.deepEqual(calls.posts[0].data.accountList, ['douyin.json'])
 })
 
+test('AI declaration defaults on for each tab and keeps the user choice when switching platforms', async t => {
+  const harness = mountPublishCenter()
+  t.after(harness.unmount)
+  await settle()
+  const { state } = harness
+  assert.equal(state.tabs[0].aiGenerated, true)
+  state.tabs[0].aiGenerated = false
+  state.tabs[0].selectedPlatform = 3
+  state.handlePlatformChange(state.tabs[0])
+  assert.equal(state.tabs[0].aiGenerated, false)
+  state.addTab()
+  assert.equal(state.tabs[1].aiGenerated, true)
+  assert.equal(state.tabs[0].aiGenerated, false)
+})
+
+test('publishing forwards both AI choices independently of the original-content checkbox', async t => {
+  const harness = mountPublishCenter()
+  t.after(harness.unmount)
+  await settle()
+  const { state, calls } = harness
+  const tab = state.tabs[0]
+  for (const aiGenerated of [false, true]) {
+    fillPublishTab(tab)
+    tab.aiGenerated = aiGenerated
+    tab.isOriginal = true
+    await state.confirmPublish(tab)
+    assert.equal(calls.posts.at(-1).data.aiGenerated, aiGenerated)
+    assert.equal(calls.posts.at(-1).data.category, 1)
+    assert.equal(tab.aiGenerated, true, 'successful publishing resets the option to its default')
+  }
+})
+
+test('batch publishing sends the independent AI choice of each tab', async t => {
+  const harness = mountPublishCenter()
+  t.after(harness.unmount)
+  await settle()
+  const { state, calls } = harness
+  fillPublishTab(state.tabs[0])
+  state.tabs[0].aiGenerated = false
+  state.addTab()
+  fillPublishTab(state.tabs[1])
+  await state.batchPublish()
+  assert.deepEqual(calls.posts.map(call => call.data.aiGenerated), [false, true])
+})
+
 test('publish errors still reject for batch callers while the single-button handler consumes them', async t => {
   const failure = new Error('抖音登录已失效，请重新登录')
   const harness = mountPublishCenter({ post: async () => { throw failure } })

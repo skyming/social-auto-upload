@@ -234,6 +234,8 @@ class BrowserCliDispatchTests(unittest.TestCase):
             images=[Path("1.png")],
             title="图文标题",
             note="图文正文",
+            notef=None,
+            bgm="",
             tags="测试,图文",
             schedule=0,
             debug=False,
@@ -262,6 +264,7 @@ class BrowserCliDispatchTests(unittest.TestCase):
             product_link="",
             product_title="",
             declaration="已确认声明原文",
+            collection=None,
             debug=False,
             headless=True,
         )
@@ -289,6 +292,7 @@ class BrowserCliDispatchTests(unittest.TestCase):
             short_title=None,
             category=None,
             draft=False,
+            collection=None,
             debug=False,
             headless=True,
         )

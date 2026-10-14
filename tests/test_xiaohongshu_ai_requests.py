@@ -1,5 +1,6 @@
 import asyncio
 import io
+import sqlite3
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
@@ -64,6 +65,14 @@ class XiaohongshuAiWebTests(unittest.TestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(redirect_stdout(io.StringIO()))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base_dir = Path(directory.name)
+        (base_dir / 'db').mkdir()
+        with sqlite3.connect(base_dir / 'db' / 'database.db') as connection:
+            connection.execute('CREATE TABLE user_info (type INTEGER, filePath TEXT, userName TEXT)')
+            connection.execute('INSERT INTO user_info VALUES (?, ?, ?)', (1, 'creator.json', 'creator'))
+        self.stack.enter_context(patch.object(backend, 'BASE_DIR', base_dir))
         self.uploaders = [self.stack.enter_context(patch.object(backend, name)) for name in
                           ('post_video_xhs', 'post_video_tencent', 'post_video_DouYin', 'post_video_ks')]
         self.payload = {'type': 1, 'title': 'probe', 'fileList': ['probe.mp4'],

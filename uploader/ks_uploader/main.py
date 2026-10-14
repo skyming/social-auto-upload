@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,12 @@ KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 KUAISHOU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 KUAISHOU_UPLOAD_TIMEOUT_SECONDS = 480
 KUAISHOU_PUBLISH_ATTEMPTS = 3
+KUAISHOU_AI_DECLARATION_LABEL = "含AI生成内容"
+KUAISHOU_AI_DECLARATION_NAME = re.compile(r"^含\s*AI\s*生成内容$")
+
+
+class KuaishouAiDeclarationError(RuntimeError):
+    """The required native AI declaration could not be verified before publishing."""
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -93,7 +100,7 @@ async def _focus_desc_editor(page) -> None:
         f"请据此更新选择器。最后错误: {last_err}")
 
 
-async def _click_visible_publish_confirm(page: Page) -> bool:
+async def _click_visible_publish_confirm(page: Page, before_confirm=None) -> bool:
     """Confirm an already-open Ant Design publish dialog before touching the page behind it."""
     modal = page.locator("div.ant-modal-confirm-centered:visible").first
     if not await modal.count():
@@ -103,6 +110,8 @@ async def _click_visible_publish_confirm(page: Page) -> bool:
     if not await primary_button.count():
         raise RuntimeError("快手发布确认弹窗已显示，但未找到可点击的主按钮")
 
+    if before_confirm is not None:
+        await before_confirm(modal)
     await primary_button.click(timeout=8000)
     return True
 
@@ -520,6 +529,7 @@ class KSVideo(KSBaseUploader):
         thumbnail_path=None,
         desc: str | None = None,
         collection_name: str | None = None,
+        ai_generated: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -534,6 +544,129 @@ class KSVideo(KSBaseUploader):
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
         self.collection_name = collection_name
+        if not isinstance(ai_generated, bool):
+            raise ValueError("ai_generated 必须是布尔值")
+        self.ai_generated = ai_generated
+
+    async def _select_ai_declaration_control(self, scope) -> bool:
+        """Only accept checked state on a native or ARIA checkbox/radio with the AI label."""
+        for role in ("checkbox", "radio"):
+            controls = scope.get_by_role(role, name=KUAISHOU_AI_DECLARATION_NAME)
+            for index in range(await controls.count()):
+                control = controls.nth(index)
+                if not await control.is_visible():
+                    continue
+                native = await control.evaluate(
+                    "el => el.tagName === 'INPUT' && ['checkbox', 'radio'].includes(el.type)"
+                )
+                if native:
+                    await control.check(timeout=8000)
+                    checked = await control.is_checked()
+                else:
+                    if await control.get_attribute("aria-checked") != "true":
+                        await control.click(timeout=8000)
+                    checked = await control.get_attribute("aria-checked") == "true"
+                if not checked:
+                    raise KuaishouAiDeclarationError("快手AI声明控件未选中，已停止发布")
+                kuaishou_logger.success(_msg("🧾", f"AI声明已选择并回读：{KUAISHOU_AI_DECLARATION_LABEL}"))
+                return True
+        return False
+
+    async def _select_ai_declaration_dropdown(self, page: Page, scope) -> bool:
+        """Author declaration uses an Ant Select; read its selected value, never menu text."""
+        declaration = scope.locator('label:text-is("作者声明")').locator(
+            "xpath=following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' ant-select ')]"
+        ).first
+        if not await declaration.count() or not await declaration.is_visible():
+            return False
+        selected = declaration.locator(".ant-select-selection-item")
+        if await selected.count():
+            for index in range(await selected.count()):
+                if KUAISHOU_AI_DECLARATION_NAME.fullmatch((await selected.nth(index).inner_text()).strip()):
+                    return True
+        await declaration.locator(".ant-select-selector").click(timeout=8000)
+        option = page.get_by_role("option", name=KUAISHOU_AI_DECLARATION_NAME).filter(visible=True).first
+        if not await option.count():
+            await page.keyboard.press("Escape")
+            raise KuaishouAiDeclarationError("快手作者声明中未找到「含AI生成内容」选项，已停止发布")
+        await option.click(timeout=8000)
+        await page.keyboard.press("Escape")
+        for index in range(await selected.count()):
+            if KUAISHOU_AI_DECLARATION_NAME.fullmatch((await selected.nth(index).inner_text()).strip()):
+                kuaishou_logger.success(_msg("🧾", f"AI声明已选择并回读：{KUAISHOU_AI_DECLARATION_LABEL}"))
+                return True
+        raise KuaishouAiDeclarationError("快手作者声明未回读到「含AI生成内容」，已停止发布")
+
+    async def apply_ai_declaration(self, page: Page, *, scope=None, required=True) -> bool:
+        if not self.ai_generated:
+            return False
+        if scope is None:
+            modal = page.locator("div.ant-modal-confirm-centered:visible").first
+            if await modal.count() and await self.apply_ai_declaration(page, scope=modal, required=False):
+                return True
+            scope = page
+        try:
+            if await self._select_ai_declaration_control(scope):
+                return True
+            if await self._select_ai_declaration_dropdown(page, scope):
+                return True
+        except KuaishouAiDeclarationError:
+            raise
+        except Exception as exc:
+            raise KuaishouAiDeclarationError(f"快手AI声明设置失败，已停止发布: {exc}") from exc
+        if required:
+            debug_dir = await _dump_page_debug(page, "ai_declaration_not_found")
+            raise KuaishouAiDeclarationError(
+                "当前快手发布页未找到可确认的原生AI声明控件，已停止发布。"
+                f"截图和HTML已保存到 {debug_dir}"
+            )
+        return False
+
+    async def _validate_publish_confirmation(self, page: Page, modal) -> None:
+        if not self.ai_generated:
+            return
+        if await self.apply_ai_declaration(page, scope=modal, required=False):
+            return
+        # A generic confirmation may have no declaration controls. Re-read the
+        # form's actual selected state instead of trusting a prior successful call.
+        await self.apply_ai_declaration(page, scope=page)
+
+    async def publish_video(self, page: Page) -> None:
+        # Do not click an unverified publishing action just to discover whether
+        # this platform version might reveal a declaration dialog afterwards.
+        await self.apply_ai_declaration(page)
+        last_publish_error = None
+        for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):
+            try:
+                async def validate_confirmation(modal):
+                    await self._validate_publish_confirmation(page, modal)
+
+                confirmed = await _click_visible_publish_confirm(page, validate_confirmation)
+                if not confirmed:
+                    publish_button = page.get_by_text("发布", exact=True)
+                    if await publish_button.count() == 0:
+                        raise RuntimeError("未找到快手发布按钮")
+                    await self.apply_ai_declaration(page)
+                    await publish_button.click()
+
+                await asyncio.sleep(1)
+                await _click_visible_publish_confirm(page, validate_confirmation)
+                await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
+                kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
+                return
+            except KuaishouAiDeclarationError:
+                raise
+            except Exception as exc:
+                last_publish_error = exc
+                kuaishou_logger.info(_msg(
+                    "🏃", f"小人正在冲刺发布视频（{attempt}/{KUAISHOU_PUBLISH_ATTEMPTS}）: {exc}"
+                ))
+                if self.debug:
+                    await page.screenshot(full_page=True)
+                await asyncio.sleep(1)
+        raise RuntimeError(
+            f"快手发布连续失败 {KUAISHOU_PUBLISH_ATTEMPTS} 次，已停止重试: {last_publish_error}"
+        )
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -708,34 +841,7 @@ class KSVideo(KSBaseUploader):
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
-            last_publish_error = None
-            for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):
-                try:
-                    confirmed = await _click_visible_publish_confirm(page)
-                    if not confirmed:
-                        publish_button = page.get_by_text("发布", exact=True)
-                        if await publish_button.count() == 0:
-                            raise RuntimeError("未找到快手发布按钮")
-                        await publish_button.click()
-
-                    await asyncio.sleep(1)
-                    await _click_visible_publish_confirm(page)
-
-                    await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
-                    kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-                    break
-                except Exception as exc:
-                    last_publish_error = exc
-                    kuaishou_logger.info(_msg(
-                        "🏃", f"小人正在冲刺发布视频（{attempt}/{KUAISHOU_PUBLISH_ATTEMPTS}）: {exc}"
-                    ))
-                    if self.debug:
-                        await page.screenshot(full_page=True)
-                    await asyncio.sleep(1)
-            else:
-                raise RuntimeError(
-                    f"快手发布连续失败 {KUAISHOU_PUBLISH_ATTEMPTS} 次，已停止重试: {last_publish_error}"
-                )
+            await self.publish_video(page)
 
             upload_success = True
         finally:

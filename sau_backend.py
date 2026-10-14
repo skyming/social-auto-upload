@@ -413,6 +413,10 @@ def postVideo():
     if not data:
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
+    ai_generated = data.get('aiGenerated', True)
+    if not isinstance(ai_generated, bool):
+        return jsonify({"code": 400, "msg": "包含 AI 生成选项 aiGenerated 必须是布尔值", "data": None}), 400
+
     # 从JSON数据中提取fileList和accountList
     file_list = data.get('fileList', [])
     account_list = data.get('accountList', [])
@@ -474,16 +478,16 @@ def postVideo():
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, ai_generated=data.get('aiGenerated', True))
+                                   start_days, ai_generated=ai_generated)
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft)
+                                   start_days, is_draft, ai_generated=ai_generated)
             case 3:
                 post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, thumbnail_path, productLink, productTitle)
+                          start_days, thumbnail_path, productLink, productTitle, ai_generated=ai_generated)
             case 4:
                 post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days)
+                          start_days, ai_generated=ai_generated)
             case _:
                 return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
 
@@ -546,6 +550,12 @@ def postVideoBatch():
 
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
+    # 校验整批 AI 选项后再发布，避免后续任务参数错误时已发布前面的任务。
+    for data in data_list:
+        if not isinstance(data, dict):
+            return jsonify({"code": 400, "msg": "发布任务必须是 JSON 对象", "data": None}), 400
+        if not isinstance(data.get('aiGenerated', True), bool):
+            return jsonify({"code": 400, "msg": "包含 AI 生成选项 aiGenerated 必须是布尔值", "data": None}), 400
     for data in data_list:
         # 从JSON数据中提取fileList和accountList
         file_list = data.get('fileList', [])
@@ -560,6 +570,7 @@ def postVideoBatch():
         productLink = data.get('productLink', '')
         productTitle = data.get('productTitle', '')
         is_draft = data.get('isDraft', False)
+        ai_generated = data.get('aiGenerated', True)
 
         videos_per_day = data.get('videosPerDay')
         daily_times = data.get('dailyTimes')
@@ -570,16 +581,16 @@ def postVideoBatch():
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                               start_days, ai_generated=data.get('aiGenerated', True))
+                               start_days, ai_generated=ai_generated)
             case 2:
                 post_video_tencent(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                                   start_days, is_draft)
+                                   start_days, is_draft, ai_generated=ai_generated)
             case 3:
                 post_video_DouYin(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days, productLink, productTitle)
+                          start_days, productLink, productTitle, ai_generated=ai_generated)
             case 4:
                 post_video_ks(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
-                          start_days)
+                          start_days, ai_generated=ai_generated)
     # 返回响应给客户端
     return jsonify(
         {

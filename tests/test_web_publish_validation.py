@@ -1,10 +1,12 @@
+import io
 import sqlite3
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import myUtils.postVideo as publishers
 import sau_backend
 
 
@@ -22,6 +24,7 @@ class WebPublishValidationTests(unittest.TestCase):
             )
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        self.stack.enter_context(redirect_stdout(io.StringIO()))
         self.stack.enter_context(patch.object(sau_backend, "BASE_DIR", base_dir))
         self.uploaders = {
             platform: self.stack.enter_context(patch.object(sau_backend, name))
@@ -34,7 +37,7 @@ class WebPublishValidationTests(unittest.TestCase):
         }
         self.client = sau_backend.app.test_client()
 
-    def publish(self, platform=3, accounts=None, **options):
+    def payload(self, platform=3, accounts=None, **options):
         payload = {
             "type": platform,
             "title": "测试标题",
@@ -48,7 +51,11 @@ class WebPublishValidationTests(unittest.TestCase):
             "startDays": 0,
         }
         payload.update(options)
-        return self.client.post("/postVideo", json=payload)
+        return payload
+
+    def publish(self, platform=3, accounts=None, route="/postVideo", **options):
+        payload = self.payload(platform=platform, accounts=accounts, **options)
+        return self.client.post(route, json=[payload] if route.endswith("Batch") else payload)
 
     def assert_no_upload(self):
         for uploader in self.uploaders.values():
@@ -83,6 +90,7 @@ class WebPublishValidationTests(unittest.TestCase):
                 self.assertEqual(uploader.call_args.args[:6], (
                     "测试标题", ["video.mp4"], ["测试"], [f"account-{platform}.json"], None, 0,
                 ))
+                self.assertIs(uploader.call_args.kwargs["ai_generated"], True)
                 uploader.reset_mock()
                 self.assert_no_upload()
 
@@ -92,7 +100,102 @@ class WebPublishValidationTests(unittest.TestCase):
         self.uploaders[3].assert_called_once_with(
             "测试标题", ["video.mp4"], ["测试"], ["account-3.json"], None, 0,
             1, ["10:00"], 0, "cover.png", "https://example.com/product", "商品",
+            ai_generated=True,
         )
+
+    def test_single_and_batch_ai_choices_dispatch_to_each_platform(self):
+        for route in ("/postVideo", "/postVideoBatch"):
+            for platform, uploader in self.uploaders.items():
+                for declaration in ({}, {"aiGenerated": True}, {"aiGenerated": False}):
+                    with self.subTest(route=route, platform=platform, declaration=declaration):
+                        response = self.publish(platform=platform, route=route, **declaration)
+                        self.assertEqual(response.status_code, 200)
+                        uploader.assert_called_once()
+                        self.assertIs(uploader.call_args.kwargs["ai_generated"],
+                                      declaration.get("aiGenerated", True))
+                        # Original-sound category remains independent of the AI option.
+                        self.assertIsNone(uploader.call_args.args[4])
+                        uploader.reset_mock()
+                        self.assert_no_upload()
+
+    def test_non_boolean_ai_choice_is_rejected_before_upload(self):
+        for route in ("/postVideo", "/postVideoBatch"):
+            for platform in self.uploaders:
+                for value in (None, 0, 1, "true", "false", [], {}):
+                    with self.subTest(route=route, platform=platform, value=value):
+                        response = self.publish(platform=platform, route=route, aiGenerated=value)
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(response.json["code"], 400)
+                        self.assertIn("aiGenerated 必须是布尔值", response.json["msg"])
+                        self.assert_no_upload()
+
+    def test_batch_checks_all_ai_choices_before_any_upload(self):
+        response = self.client.post("/postVideoBatch", json=[
+            self.payload(platform=3, aiGenerated=True),
+            self.payload(platform=4, aiGenerated="false"),
+        ])
+        self.assertEqual(response.status_code, 400)
+        self.assert_no_upload()
+
+    def test_batch_preserves_each_tasks_ai_choice(self):
+        response = self.client.post("/postVideoBatch", json=[
+            self.payload(platform=3, aiGenerated=False),
+            self.payload(platform=3, aiGenerated=True),
+        ])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([call.kwargs["ai_generated"] for call in self.uploaders[3].call_args_list],
+                         [False, True])
+
+    def test_api_ai_choice_reaches_every_mock_uploader_through_real_bridge(self):
+        cases = (
+            (1, "post_video_xhs", "XiaoHongShuVideo", "main"),
+            (2, "post_video_tencent", "TencentVideo", "main"),
+            (3, "post_video_DouYin", "DouYinVideo", "douyin_upload_video"),
+            (4, "post_video_ks", "KSVideo", "main"),
+        )
+        for route in ("/postVideo", "/postVideoBatch"):
+            for platform, bridge_name, uploader_name, upload_method in cases:
+                for declaration in ({}, {"aiGenerated": True}, {"aiGenerated": False}):
+                    with self.subTest(route=route, platform=platform, declaration=declaration):
+                        with ExitStack() as stack:
+                            stack.enter_context(patch.object(publishers, "BASE_DIR", sau_backend.BASE_DIR))
+                            stack.enter_context(patch.object(sau_backend, bridge_name,
+                                                            new=getattr(publishers, bridge_name)))
+                            uploader = stack.enter_context(patch.object(publishers, uploader_name))
+                            upload = AsyncMock()
+                            setattr(uploader.return_value, upload_method, upload)
+                            response = self.publish(platform=platform, route=route,
+                                                    fileList=["one.mp4", "two.mp4"],
+                                                    isDraft=True, **declaration)
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(uploader.call_count, 2)
+                        self.assertEqual(upload.await_count, 2)
+                        for call in uploader.call_args_list:
+                            self.assertIs(call.kwargs["ai_generated"],
+                                          declaration.get("aiGenerated", True))
+                            self.assertEqual(call.args[4],
+                                             sau_backend.BASE_DIR / "cookiesFile" / f"account-{platform}.json")
+                            if platform == 2:
+                                self.assertIsNone(call.args[5])
+                                self.assertIs(call.args[6], True)
+
+    def test_bridge_defaults_preserve_legacy_positionals(self):
+        cases = (
+            ("post_video_tencent", "TencentVideo", "main", (None, False, 1, [], 0, True)),
+            ("post_video_DouYin", "DouYinVideo", "douyin_upload_video",
+             (None, False, 1, [], 0, "cover.png", "product-link", "商品")),
+            ("post_video_ks", "KSVideo", "main", (None, False, 1, [], 0)),
+        )
+        for bridge_name, uploader_name, upload_method, options in cases:
+            with self.subTest(bridge=bridge_name):
+                with patch.object(publishers, uploader_name) as uploader:
+                    setattr(uploader.return_value, upload_method, AsyncMock())
+                    getattr(publishers, bridge_name)("测试", ["video.mp4"], [], ["creator.json"], *options)
+                self.assertIs(uploader.call_args.kwargs["ai_generated"], True)
+                if uploader_name == "TencentVideo":
+                    self.assertEqual(uploader.call_args.args[5:], (None, True))
+                elif uploader_name == "DouYinVideo":
+                    self.assertEqual(uploader.call_args.args[5:], ("cover.png", "product-link", "商品"))
 
 
 if __name__ == "__main__":

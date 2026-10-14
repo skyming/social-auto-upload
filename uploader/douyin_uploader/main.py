@@ -519,7 +519,7 @@ class DouYinBaseUploader(BaseVideoUploader):
             if await dialog.count() == 0:
                 dialog = page.locator(".semi-modal-body").filter(has_text="请选择声明类型").first
             if await dialog.count() == 0:
-                douyin_logger.warning(_msg("🧾", "自主声明弹窗未打开，跳过声明继续发布"))
+                douyin_logger.warning(_msg("🧾", "自主声明弹窗未打开"))
                 return False
             await dialog.first.wait_for(state="visible", timeout=6000)
 
@@ -538,6 +538,12 @@ class DouYinBaseUploader(BaseVideoUploader):
                 await dialog.get_by_text(declaration, exact=True).first.click(timeout=6000, force=True)
             await page.wait_for_timeout(400)
 
+            # 读取原生 radio 选中状态，不能把点击成功当作声明已生效。
+            selected_radio = option.locator('input[type="radio"]').first
+            if not await selected_radio.count() or not await selected_radio.is_checked():
+                douyin_logger.warning(_msg("🧾", "自主声明选项未处于选中状态"))
+                return False
+
             # 确定：footer 的 primary 按钮
             confirm_btn = dialog.locator("button.semi-button-primary").filter(has_text="确定").first
             if await confirm_btn.count() == 0:
@@ -548,14 +554,11 @@ class DouYinBaseUploader(BaseVideoUploader):
                 await confirm_btn.click(timeout=6000)
             except Exception:
                 await _native_click(page, confirm_btn)
-            try:
-                await dialog.first.wait_for(state="hidden", timeout=6000)
-            except Exception:
-                pass
+            await dialog.first.wait_for(state="hidden", timeout=6000)
             douyin_logger.success(_msg("🧾", f"自主声明已选择「{declaration}」"))
             return True
         except Exception as exc:
-            douyin_logger.warning(_msg("🧾", f"自主声明设置失败，跳过该步骤继续发布：{exc}"))
+            douyin_logger.warning(_msg("🧾", f"自主声明设置失败：{exc}"))
             return False
 
     async def select_bgm(self, page: Page, bgm_name: str) -> bool:
@@ -643,6 +646,7 @@ class DouYinVideo(DouYinBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         declaration: str | None = None,
+        ai_generated: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -661,8 +665,11 @@ class DouYinVideo(DouYinBaseUploader):
         self.desc = desc or ""
         self.collection_name = collection_name
         self.declaration = declaration.strip() if declaration and declaration.strip() else None
+        self.ai_generated = ai_generated
 
     async def apply_self_declaration(self, page: Page) -> None:
+        if not self.declaration and self.ai_generated:
+            self.declaration = "内容由AI生成"
         if not self.declaration:
             return
         if not await self.set_self_declaration(page, self.declaration):
@@ -1046,11 +1053,19 @@ class DouYinVideo(DouYinBaseUploader):
             await self.set_product_link(page, self.productLink, self.productTitle)
             douyin_logger.info(_msg("🥳", "商品链接设置完成"))
 
-        # 自主声明：本项目成片含 AI 生成内容（TTS 配音 / AI 字幕 / AI 前贴片），
-        # 按平台合规如实选「内容由AI生成」（与转载等并列，单选，无二级选项、无需填来源）。
-        if not self.declaration:
-            self.declaration = "内容由AI生成"
-        await self.apply_self_declaration(page)
+        # 按发布选项设置 AI 标注；关闭时不自动添加，显式声明仍保留。
+        try:
+            await self.apply_self_declaration(page)
+        except Exception:
+            try:
+                await context.close()
+            except Exception as exc:
+                douyin_logger.warning(_msg("⚠️", f"关闭 context 失败: {exc}"))
+            try:
+                await browser.close()
+            except Exception as exc:
+                douyin_logger.warning(_msg("⚠️", f"关闭 browser 失败: {exc}"))
+            raise
 
         # 先归集：此时尚未打开封面弹窗，避免 dy-creator-content-portal 封面浮层拦截合集下拉
         # （实测：封面弹窗在 headless 下常滞留"检测中"未关闭，会盖住"添加合集"下拉）
