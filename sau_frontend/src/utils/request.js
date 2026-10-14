@@ -43,23 +43,29 @@ request.interceptors.response.use(
     
     // 处理HTTP错误状态码
     if (error.response) {
-      const { status } = error.response
-      switch (status) {
-        case 401:
-          ElMessage.error('未授权，请重新登录')
-          // 可以在这里处理登录跳转
-          break
-        case 403:
-          ElMessage.error('拒绝访问')
-          break
-        case 404:
-          ElMessage.error('请求地址不存在')
-          break
-        case 500:
-          ElMessage.error('服务器内部错误')
-          break
-        default:
-          ElMessage.error('网络错误')
+      const { status, data } = error.response
+      const serverMessage = data?.msg || data?.message
+      if (typeof serverMessage === 'string' && serverMessage.trim()) {
+        error.message = serverMessage
+        ElMessage.error(serverMessage)
+      } else {
+        switch (status) {
+          case 401:
+            ElMessage.error('未授权，请重新登录')
+            // 可以在这里处理登录跳转
+            break
+          case 403:
+            ElMessage.error('拒绝访问')
+            break
+          case 404:
+            ElMessage.error('请求地址不存在')
+            break
+          case 500:
+            ElMessage.error('服务器内部错误')
+            break
+          default:
+            ElMessage.error('网络错误')
+        }
       }
     } else {
       ElMessage.error('网络连接失败')

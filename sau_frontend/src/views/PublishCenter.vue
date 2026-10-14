@@ -202,7 +202,7 @@
                     :key="material.id"
                     class="material-item"
                   >
-                    <el-checkbox :label="material.id" class="material-checkbox">
+                    <el-checkbox :value="material.id" class="material-checkbox">
                       <div class="material-info">
                         <div class="material-name">{{ material.filename }}</div>
                         <div class="material-details">
@@ -242,6 +242,7 @@
                 type="primary" 
                 plain 
                 @click="openAccountDialog(tab)"
+                :loading="accountsLoading"
                 class="select-account-btn"
               >
                 选择账号
@@ -256,17 +257,30 @@
             width="600px"
             class="account-dialog"
           >
-            <div class="account-dialog-content">
-              <el-checkbox-group v-model="tempSelectedAccounts">
+            <div class="account-dialog-content" v-loading="accountsLoading">
+              <el-alert
+                v-if="accountLoadError"
+                :title="accountLoadError"
+                type="error"
+                :closable="false"
+                show-icon
+              >
+                <el-button size="small" @click="loadPublishAccounts">重新加载账号</el-button>
+              </el-alert>
+              <el-empty
+                v-else-if="!accountsLoading && availableAccounts.length === 0"
+                description="当前平台暂无账号，请先到账号管理添加"
+              />
+              <el-checkbox-group v-else v-model="tempSelectedAccounts">
                 <div class="account-list">
                   <el-checkbox
                     v-for="account in availableAccounts"
                     :key="account.id"
-                    :label="account.id"
+                    :value="account.id"
                     class="account-item"
                   >
                     <div class="account-info">
-                      <span class="account-name">{{ account.name }}</span>                      
+                      <span class="account-name">{{ account.name }}（{{ account.platform }}）</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -276,7 +290,11 @@
             <template #footer>
               <div class="dialog-footer">
                 <el-button @click="accountDialogVisible = false">取消</el-button>
-                <el-button type="primary" @click="confirmAccountSelection">确定</el-button>
+                <el-button
+                  type="primary"
+                  @click="confirmAccountSelection"
+                  :disabled="accountsLoading || !!accountLoadError || availableAccounts.length === 0"
+                >确定</el-button>
               </div>
             </template>
           </el-dialog>
@@ -284,11 +302,15 @@
           <!-- 平台选择 -->
           <div class="platform-section">
             <h3>平台</h3>
-            <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
+            <el-radio-group
+              v-model="tab.selectedPlatform"
+              class="platform-radios"
+              @change="handlePlatformChange(tab)"
+            >
               <el-radio 
                 v-for="platform in platforms" 
                 :key="platform.key"
-                :label="platform.key"
+                :value="platform.key"
                 class="platform-radio"
               >
                 {{ platform.name }}
@@ -478,7 +500,7 @@
             <el-button
               size="small"
               type="primary"
-              @click="confirmPublish(tab)"
+              @click="publishSingle(tab)"
               :loading="tab.publishing || false"
             >
               {{ tab.publishing ? '发布中...' : '发布' }}
@@ -491,12 +513,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { materialApi } from '@/api/material'
+import { accountApi } from '@/api/account'
 import { http } from '@/utils/request'
 
 // API base URL
@@ -582,17 +605,43 @@ const currentTab = ref(null)
 // 获取账号状态管理
 const accountStore = useAccountStore()
 
+const accountsLoading = ref(false)
+const accountLoadError = ref('')
+
+const loadPublishAccounts = async () => {
+  accountsLoading.value = true
+  accountLoadError.value = ''
+  try {
+    const response = await accountApi.getAccounts()
+    accountStore.setAccounts(response.data)
+  } catch (error) {
+    accountLoadError.value = error.message || '账号加载失败，请重试'
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
+onMounted(loadPublishAccounts)
+
 // 根据选择的平台获取可用账号列表
 const availableAccounts = computed(() => {
-  const platformMap = {
-    3: '抖音',
-    2: '视频号',
-    1: '小红书',
-    4: '快手'
-  }
-  const currentPlatform = currentTab.value ? platformMap[currentTab.value.selectedPlatform] : null
-  return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
+  if (!currentTab.value) return []
+  return accountStore.accounts.filter(
+    account => Number(account.type) === Number(currentTab.value.selectedPlatform)
+  )
 })
+
+const filterAccountsForPlatform = (accountIds, platform) => accountIds.filter(id =>
+  accountStore.accounts.some(account =>
+    account.id === id && Number(account.type) === Number(platform)
+  )
+)
+
+const handlePlatformChange = (tab) => {
+  tab.selectedAccounts = []
+  tab.publishStatus = null
+  if (currentTab.value === tab) tempSelectedAccounts.value = []
+}
 
 // 话题相关状态
 const topicDialogVisible = ref(false)
@@ -729,14 +778,16 @@ const confirmTopicSelection = () => {
 // 打开账号选择弹窗
 const openAccountDialog = (tab) => {
   currentTab.value = tab
-  tempSelectedAccounts.value = [...tab.selectedAccounts]
+  tempSelectedAccounts.value = filterAccountsForPlatform(tab.selectedAccounts, tab.selectedPlatform)
   accountDialogVisible.value = true
 }
 
 // 确认账号选择
 const confirmAccountSelection = () => {
   if (currentTab.value) {
-    currentTab.value.selectedAccounts = [...tempSelectedAccounts.value]
+    currentTab.value.selectedAccounts = filterAccountsForPlatform(
+      tempSelectedAccounts.value, currentTab.value.selectedPlatform
+    )
   }
   accountDialogVisible.value = false
   currentTab.value = null
@@ -751,7 +802,7 @@ const removeAccount = (tab, index) => {
 // 获取账号显示名称
 const getAccountDisplayName = (accountId) => {
   const account = accountStore.accounts.find(acc => acc.id === accountId)
-  return account ? account.name : accountId
+  return account ? `${account.name}（${account.platform}）` : accountId
 }
 
 // 取消发布
@@ -790,16 +841,27 @@ const confirmPublish = async (tab) => {
     throw new Error('请选择发布账号')
   }
 
+  const selectedAccounts = tab.selectedAccounts.map(accountId =>
+    accountStore.accounts.find(account => account.id === accountId)
+  )
+  if (selectedAccounts.some(account => !account || !account.filePath)) {
+    ElMessage.error('所选账号不存在，请刷新后重新选择账号')
+    tab.publishing = false
+    throw new Error('所选账号不存在，请刷新后重新选择账号')
+  }
+  if (selectedAccounts.some(account => Number(account.type) !== Number(tab.selectedPlatform))) {
+    ElMessage.error('所选账号与发布平台不一致，请重新选择账号')
+    tab.publishing = false
+    throw new Error('所选账号与发布平台不一致，请重新选择账号')
+  }
+
   // 构造发布数据，符合后端API格式
   const publishData = {
     type: tab.selectedPlatform,
     title: tab.title,
     tags: tab.selectedTopics, // 不带#号的话题列表
     fileList: tab.fileList.map(file => file.path), // 只发送文件路径
-    accountList: tab.selectedAccounts.map(accountId => {
-      const account = accountStore.accounts.find(acc => acc.id === accountId)
-      return account ? account.filePath : accountId
-    }), // 发送账号的文件路径
+    accountList: selectedAccounts.map(account => account.filePath),
     enableTimer: tab.scheduleEnabled ? 1 : 0,
     videosPerDay: tab.scheduleEnabled ? tab.videosPerDay || 1 : 1,
     dailyTimes: tab.scheduleEnabled ? tab.dailyTimes || ['10:00'] : ['10:00'],
@@ -835,6 +897,14 @@ const confirmPublish = async (tab) => {
     throw error
   } finally {
     tab.publishing = false
+  }
+}
+
+const publishSingle = async (tab) => {
+  try {
+    await confirmPublish(tab)
+  } catch {
+    // 错误已由验证提示或请求拦截器展示；批量发布仍使用 confirmPublish 统计失败。
   }
 }
 

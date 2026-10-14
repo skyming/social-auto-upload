@@ -447,6 +447,30 @@ def postVideo():
     print("Account List:", account_list)
 
     try:
+        # 前端发送 Cookie 文件名；先校验所有账号，避免跨平台 Cookie 被送到错误的上传器。
+        platform_names = {1: "小红书", 2: "视频号", 3: "抖音", 4: "快手"}
+        if type not in (1, 2, 3, 4):
+            return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
+        if not isinstance(account_list, list):
+            return jsonify({"code": 400, "msg": "账号列表格式错误", "data": None}), 400
+        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            for account_file in account_list:
+                if not isinstance(account_file, str):
+                    return jsonify({"code": 400, "msg": "发布账号不存在，请重新选择账号", "data": None}), 400
+                account = conn.execute(
+                    "SELECT type, userName FROM user_info WHERE filePath = ?",
+                    (account_file,),
+                ).fetchone()
+                if account is None:
+                    return jsonify({"code": 400, "msg": "发布账号不存在，请重新选择账号", "data": None}), 400
+                account_type, account_name = account
+                if account_type != type:
+                    account_platform = platform_names.get(account_type, str(account_type))
+                    return jsonify({
+                        "code": 400,
+                        "msg": f"账号“{account_name}”属于{account_platform}，不能用于{platform_names[type]}发布，请重新选择账号",
+                        "data": None,
+                    }), 400
         match type:
             case 1:
                 post_video_xhs(title, file_list, tags, account_list, category, enableTimer, videos_per_day, daily_times,
